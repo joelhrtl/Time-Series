@@ -1,0 +1,236 @@
+---
+title: "Proyect"
+author: "Gonzalo Castro"
+date: "2026-03-24"
+output: pdf_document
+---
+
+
+Libraries
+```{r}
+library(fpp2)
+library(forecast)
+library(urca)
+library(Metrics)
+library(quantmod)
+library(lmtest)
+library(corrplot)
+library(ggplot2)  
+library(readxl)
+```
+
+## Data Collection
+### Importing data from Yahoo Finance and turning to monthly
+```{r}
+data <- read_excel("TIIE copy.xlsx")
+attach(data)
+data=ts(data,frequency=12)
+tail(data)
+```
+### Check missing values
+```{r}
+sum(is.na(data))
+```
+No missing data
+
+### Plotting to identify trends
+```{r}
+plot(TIIE,type="l",col="red",xlab = "Time", ylab = "TIIE")
+```
+
+## Data Management 
+### Checking number of diffs required to remove trend in data
+```{r}
+ndiffs(TIIE)
+```
+Monthly Data seems to have a trend which need to be dealt with.
+
+### Checking number of  diffs required to seasonality trend in data
+```{r}
+seasonal_d <- tryCatch(
+  nsdiffs(TIIE),
+  error = function(e) 0
+)
+
+if (seasonal_d == 0) {
+  cat("No Seasonality\n")
+} else {
+  cat("Seasonality present, D =", seasonal_d, "\n")
+}
+```
+MonthlyData NOT seem to have a seasonal component which need to be dealt with.
+
+### Checking for stationarity with KPSS
+```{r}
+summary(ur.kpss(TIIE))
+```
+Hypothesis Test:
+H0: x is stationary
+H1: x is non stationary
+
+If test statistic < critical value (5% level) --> NOT reject H0
+
+If test statistic > critical value (5% level) --> reject H0
+
+Therefore,
+Since T-Statistic (0.3263) < CR at 5% (0.463), we do NOT reject the H0 of stationarity, and assume the data IS stationary.
+
+So far, the data is non stationary and NON seasonal.
+
+### Observing the second lag - Removing stationarity (as per the nddiff function)
+```{r}
+dm1=diff(TIIE,lag=2)
+dev.new()
+dm1=na.omit(dm1)
+plot(dm1,type="l",col="blue")
+```
+```{r}
+summary(ur.kpss(dm1))
+seasonal_d <- tryCatch(
+  nsdiffs(dm1),
+  error = function(e) 0
+)
+
+if (seasonal_d == 0) {
+  cat("No Seasonality\n")
+} else {
+  cat("Seasonality present, D =", seasonal_d, "\n")
+}
+```
+We can observe and test that the trend is NOT removed from the data (by observing the new plot and doing the KPSS hypothesis test for stationarity) on the second lag. The seasonal component is corrected, however.
+
+
+### Estimate the max AR levels for the ARIMA model
+```{r}
+pacf(TIIE)
+```
+If the coefficient goes outside the confidence interval, it is significant.
+
+In this case "p" = 1
+
+### Estimate the max MA levels for the ARIMA model
+```{r}
+acf(TIIE)
+```
+Similar interpretation as PACF
+
+The first AC coefficient is ignored because it measures xt with xt, so the variable with itself.
+
+in this case, "q" = 0
+
+Therefore, the optimal ARIMA order would be of (1,2,0)
+
+## Modeling
+### 
+```{r}
+n=nrow(data) # total number of observations
+n
+
+tt=floor(n*0.75) # amount of data used in the models to forecast
+tt
+
+h=n-tt # number of forecasts to calculate
+h
+```
+
+```{r}
+# split the data into training (insample) and test (out-of-sample)
+train=ts(window(TIIE,start=1,end=floor(0.75*length(TIIE))),frequency=12)
+length(train)
+
+test=ts(window(TIIE,start=floor(0.75*length(TIIE))+1),frequency=12)
+length(test)
+
+(length(train)+length(test))==length(TIIE)
+```
+
+```{r}
+# check for missing data on the test
+sum(is.na(test))
+```
+
+### Automatic estimation of best/most eficient ARIMA model
+```{r}
+fit_best=auto.arima(train,allowmean=T)
+summary(fit_best)
+coeftest(fit_best)
+```
+
+```{r}
+pred_arima_best=forecast(fit_best,h=h)
+
+rmse_arima_best=rmse(as.numeric(test),as.numeric(pred_arima_best$mean))
+
+mae_arima_best=mae(as.numeric(test),as.numeric(pred_arima_best$mean))
+```
+
+
+### Alternative ARIMA (1,1,0)
+```{r}
+fit_alt=Arima(train,order=c(1,1,0),include.drift=T)
+summary(fit_alt)
+coeftest(fit_alt)
+```
+
+
+```{r}
+pred_arima_alt=forecast(fit_alt,h=h)
+
+rmse_arima_alt=rmse(as.numeric(test),as.numeric(pred_arima_alt$mean))
+
+mae_arima_alt=mae(as.numeric(test),as.numeric(pred_arima_alt$mean))
+```
+
+### Additive HW prediction & RMSE
+```{r}
+pred_add=hw(ts(train,frequency=12),h=h,seasonal="additive")
+
+rmse_add=rmse(as.numeric(test),as.numeric(pred_add$mean))
+
+mae_add=mae(as.numeric(test),as.numeric(pred_add$mean))
+```
+
+### Multiplicative HW prediction & RMSE
+```{r}
+pred_mult=hw(ts(train,frequency=12),h=h,seasonal="multiplicative")
+
+rmse_mult=rmse(as.numeric(test),as.numeric(pred_mult$mean))
+
+mae_mult=mae(as.numeric(test),as.numeric(pred_mult$mean))
+```
+
+Which method is the best?
+
+```{r}
+eff=data.frame(Model=c("ARIMA (1,1,0)","ARIMA (0, 1, 0)","ADD H-W","MULT H-W"),RMSE=c(rmse_arima_alt,rmse_arima_best,rmse_add,rmse_mult),MAE=c(mae_arima_alt,mae_arima_best,mae_add,mae_mult))
+eff
+```
+I choose RMSE because it penalises large forecast errors more heavily, which is critical when predicting asset prices where substantial deviations can lead to significant financial consequences. Finally, I include MAE as a robust alternative that is less influenced by outliers, ensuring my conclusions are not driven by a few extreme errors.
+
+```{r}
+c("ARIMA alt","ARIMA best","ADD HW","MULT HW")[which.min(c(rmse_arima_alt,rmse_arima_best,rmse_add,rmse_mult))]
+c("ARIMA alt","ARIMA best","ADD HW","MULT HW")[which.min(c(mae_arima_alt,mae_arima_best,mae_add,mae_mult))]
+```
+
+
+
+
+```{r}
+print("optimal values of the estimated parameters of the ADD HW method")
+print(pred_add$model)
+```
+
+```{r}
+print("optimal values of the estimated parameters of the MULT HW method")
+print(pred_mult$model)
+```
+
+```{r}
+# Visualization of the Comparison
+autoplot(ts(TIIE, frequency=12), series = "Training Data") +  
+  autolayer(pred_mult, series = "HW Forecast Multi",PI=FALSE) +
+  autolayer(pred_arima_best, series = "ARIMA best Forecast",PI=FALSE) +
+  autolayer(pred_add, series = "HW Forecast Addi",PI=FALSE) +
+  labs(title = "Forecast Comparison: Apple Stock", y = "Price (USD)") +
+  theme_minimal()
+```
